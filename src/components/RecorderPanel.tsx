@@ -1,10 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AudioVisualizer } from "@/components/AudioVisualizer";
+import { TranscriptionProgress } from "@/components/TranscriptionProgress";
 import { TranscriptView } from "@/components/TranscriptView";
 import { useAudioRecorder } from "@/hooks/useAudioRecorder";
+import { useModelPreference } from "@/hooks/useModelPreference";
 import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
+import { useWhisper } from "@/hooks/useWhisper";
 import { DEFAULT_LANGUAGE, LANGUAGES } from "@/lib/speech";
 import {
   countWords,
@@ -13,23 +16,54 @@ import {
   formatDuration,
   timestampForFilename,
 } from "@/lib/utils";
+import { WHISPER_MODELS, findModel, type WhisperModelId } from "@/lib/whisper";
 
 export function RecorderPanel() {
   const [language, setLanguage] = useState<string>(DEFAULT_LANGUAGE);
+  const [model, handleModelChange] = useModelPreference();
   const [copied, setCopied] = useState(false);
+  /** `true` depois que o Whisper substituiu a prévia da Web Speech. */
+  const [refined, setRefined] = useState(false);
 
   const recorder = useAudioRecorder();
   const speech = useSpeechRecognition(language);
+  const whisper = useWhisper();
 
   const active = recorder.recording;
   const fullText = speech.transcript;
-  const error = recorder.error ?? speech.error;
+  const error = recorder.error ?? speech.error ?? whisper.error;
+
+  /** Áudio que já foi (ou está sendo) transcrito, para não repetir o trabalho. */
+  const transcribedRef = useRef<Blob | null>(null);
+
+  const runWhisper = useCallback(
+    async (blob: Blob) => {
+      const text = await whisper.transcribe(blob, { model, language });
+      // `null` é cancelamento ou erro: a prévia ao vivo continua valendo.
+      if (text === null) return;
+      speech.setTranscript(text);
+      setRefined(true);
+    },
+    [language, model, speech, whisper],
+  );
+
+  // Parar a gravação dispara a transcrição de verdade. A prévia da Web Speech
+  // fica na tela até o Whisper terminar e substituí-la.
+  useEffect(() => {
+    const result = recorder.result;
+    if (!result || transcribedRef.current === result.blob) return;
+    transcribedRef.current = result.blob;
+    void runWhisper(result.blob);
+  }, [recorder.result, runWhisper]);
 
   const handleStart = useCallback(async () => {
     // O microfone é pedido primeiro: sem permissão, nem começamos a escutar.
     const ok = await recorder.start();
-    if (ok) speech.start();
-  }, [recorder, speech]);
+    if (!ok) return;
+    whisper.cancel();
+    setRefined(false);
+    speech.start();
+  }, [recorder, speech, whisper]);
 
   const handleStop = useCallback(() => {
     speech.stop();
@@ -42,9 +76,19 @@ export function RecorderPanel() {
   }, [active, handleStart, handleStop]);
 
   const handleClear = useCallback(() => {
+    whisper.cancel();
+    transcribedRef.current = null;
+    setRefined(false);
     speech.reset();
     recorder.clear();
-  }, [recorder, speech]);
+  }, [recorder, speech, whisper]);
+
+  const handleRetranscribe = useCallback(() => {
+    const result = recorder.result;
+    if (!result) return;
+    setRefined(false);
+    void runWhisper(result.blob);
+  }, [recorder.result, runWhisper]);
 
   const handleCopy = useCallback(async () => {
     if (!fullText) return;
@@ -80,14 +124,16 @@ export function RecorderPanel() {
   }, [recorder.result]);
 
   const unsupported = speech.supported === false;
+  const selectedModel = findModel(model);
 
   return (
     <div className="flex w-full flex-col gap-6">
       {unsupported && (
         <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-200">
-          Este navegador não tem a Web Speech API. A transcrição em tempo real
-          funciona no <strong>Chrome</strong>, <strong>Edge</strong> ou{" "}
-          <strong>Safari</strong> — a gravação do áudio continua disponível aqui.
+          Este navegador não tem a Web Speech API, então a prévia ao vivo não
+          aparece — ela existe no <strong>Chrome</strong>,{" "}
+          <strong>Edge</strong> e <strong>Safari</strong>. A transcrição final
+          com o Whisper roda normalmente aqui ao parar a gravação.
         </p>
       )}
 
@@ -135,8 +181,8 @@ export function RecorderPanel() {
                 : speech.listening
                   ? "Ouvindo… fale normalmente"
                   : speech.error || unsupported
-                    ? "Gravando — transcrição indisponível"
-                    : "Gravando (reconhecimento iniciando…)"}
+                    ? "Gravando — o texto sai ao parar"
+                    : "Gravando (prévia iniciando…)"}
             </p>
           </div>
 
@@ -157,17 +203,67 @@ export function RecorderPanel() {
               ))}
             </select>
           </label>
+          <label className="flex items-center gap-2 text-sm">
+            <span className="text-black/60 dark:text-white/60">Qualidade</span>
+            <select
+              value={model}
+              onChange={(event) =>
+                handleModelChange(event.target.value as WhisperModelId)
+              }
+              disabled={active || whisper.busy}
+              className="rounded-lg border border-black/10 bg-white px-3 py-1.5 text-sm disabled:opacity-50 dark:border-white/15 dark:bg-neutral-900"
+            >
+              {WHISPER_MODELS.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label} · {option.sizeLabel}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <p className="-mt-3 max-w-md text-center text-xs text-black/45 dark:text-white/45">
+            {selectedModel.description}{" "}
+            {!active && !whisper.busy && (
+              <button
+                type="button"
+                onClick={() => whisper.preload(model)}
+                className="font-medium text-indigo-600 underline underline-offset-2 dark:text-indigo-400"
+              >
+                Baixar agora
+              </button>
+            )}
+          </p>
+
           {active && (
-            <p className="-mt-3 text-xs text-black/40 dark:text-white/40">
-              Pare a gravação para trocar o idioma.
+            <p className="-mt-1 text-xs text-black/40 dark:text-white/40">
+              Pare a gravação para trocar o idioma ou a qualidade.
             </p>
           )}
         </div>
       </section>
 
+      <TranscriptionProgress
+        progress={whisper.progress}
+        backend={whisper.backend}
+        onCancel={whisper.cancel}
+      />
+
       <section className="rounded-2xl border border-black/10 bg-white/70 p-6 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/5">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold">Transcrição</h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-lg font-semibold">Transcrição</h2>
+            {refined ? (
+              <span className="rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                Whisper {selectedModel.label.split(" — ")[0]}
+              </span>
+            ) : (
+              fullText && (
+                <span className="rounded-full bg-black/5 px-2.5 py-0.5 text-xs font-medium text-black/50 dark:bg-white/10 dark:text-white/50">
+                  Prévia ao vivo
+                </span>
+              )
+            )}
+          </div>
           <span className="text-xs text-black/50 dark:text-white/50">
             {countWords(fullText)} palavras · {fullText.length} caracteres
           </span>
@@ -181,6 +277,11 @@ export function RecorderPanel() {
         />
 
         <div className="mt-4 flex flex-wrap gap-2">
+          {recorder.result && !active && (
+            <ActionButton onClick={handleRetranscribe} disabled={whisper.busy}>
+              {refined ? "Transcrever de novo" : "Transcrever com Whisper"}
+            </ActionButton>
+          )}
           <ActionButton onClick={handleCopy} disabled={!fullText}>
             {copied ? "Copiado!" : "Copiar texto"}
           </ActionButton>
@@ -189,7 +290,7 @@ export function RecorderPanel() {
           </ActionButton>
           <ActionButton
             onClick={handleClear}
-            disabled={active || (!fullText && !recorder.result)}
+            disabled={active || whisper.busy || (!fullText && !recorder.result)}
           >
             Limpar
           </ActionButton>

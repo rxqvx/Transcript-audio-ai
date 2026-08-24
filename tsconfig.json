@@ -6,6 +6,9 @@
     "skipLibCheck": true,
     "strict": true,
     "noEmit": true,
+    // Os testes rodam no `node --test`, que faz strip de tipos mas não resolve
+    // extensão: por isso importam com `.ts` explícito.
+    "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "module": "esnext",
     "moduleResolution": "bundler",

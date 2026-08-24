@@ -8,16 +8,17 @@ export default function Home() {
           Transcrição ao vivo
         </h1>
         <p className="mx-auto mt-3 max-w-xl text-black/60 dark:text-white/60">
-          Grave pelo microfone e veja o texto aparecer na hora. Tudo roda no seu
-          navegador — nenhum áudio é enviado para servidores.
+          Veja o texto aparecer enquanto você fala e receba a transcrição
+          definitiva ao parar. Tudo roda no seu navegador — nenhum áudio é
+          enviado para servidores.
         </p>
       </header>
 
       <RecorderPanel />
 
       <footer className="mt-auto pt-4 text-center text-xs text-black/40 dark:text-white/40">
-        Reconhecimento de fala via Web Speech API · Melhor experiência no Chrome
-        ou Edge
+        Prévia ao vivo pela Web Speech API · Transcrição final com Whisper
+        rodando local, via WebGPU quando disponível
       </footer>
     </main>
   );

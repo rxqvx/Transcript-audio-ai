@@ -16,6 +16,17 @@ import { appendChunk } from "@/lib/utils";
 /** Erros que fazem parte do funcionamento normal — a sessão apenas reinicia. */
 const BENIGN_ERRORS = new Set(["no-speech", "aborted"]);
 
+/**
+ * `network` é transitório: o serviço do navegador cai e volta o tempo todo em
+ * gravações longas. Só vira mensagem de erro depois de insistir algumas vezes.
+ */
+const RETRYABLE_ERRORS = new Set(["network", "audio-capture"]);
+const MAX_RETRIES = 4;
+
+/** Sem nenhum sinal de vida por esse tempo, a sessão travou e é reiniciada. */
+const WATCHDOG_MS = 20_000;
+const WATCHDOG_TICK_MS = 4_000;
+
 const ERROR_MESSAGES: Record<string, string> = {
   "not-allowed":
     "Permissão do microfone negada. Libere o acesso nas configurações do navegador e tente de novo.",
@@ -47,11 +58,16 @@ export interface UseSpeechRecognitionResult {
 }
 
 /**
- * Transcrição contínua via Web Speech API.
+ * Prévia em tempo real via Web Speech API.
  *
  * O navegador encerra a sessão sozinho depois de alguns segundos de silêncio,
- * então reiniciamos automaticamente enquanto o usuário não mandar parar. Como
- * cada sessão zera o `resultIndex`, o texto confirmado é acumulado por fora.
+ * então reiniciamos automaticamente enquanto o usuário não mandar parar.
+ *
+ * O texto confirmado é montado a partir de um vetor indexado pelo `resultIndex`
+ * da sessão, e não concatenado direto. O Chrome reenvia resultados já
+ * finalizados quando revisa a interpretação — concatenar cegamente a partir do
+ * `resultIndex` faz esses trechos aparecerem duas vezes, que é o defeito mais
+ * visível numa gravação longa.
  */
 export function useSpeechRecognition(lang: string): UseSpeechRecognitionResult {
   // O suporte é lido do navegador em vez de virar estado: no servidor a resposta
@@ -68,11 +84,18 @@ export function useSpeechRecognition(lang: string): UseSpeechRecognitionResult {
   const [error, setError] = useState<string | null>(null);
 
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  /** Texto fechado das sessões anteriores. */
+  const baseRef = useRef("");
+  /** Resultados finais da sessão atual, na posição do respectivo `resultIndex`. */
+  const finalsRef = useRef<string[]>([]);
   const transcriptRef = useRef("");
   const interimRef = useRef("");
   /** Enquanto `true`, o `onend` do navegador dispara uma nova sessão. */
   const keepAliveRef = useRef(false);
   const restartTimerRef = useRef<number | null>(null);
+  const watchdogRef = useRef<number | null>(null);
+  const lastSignalRef = useRef(0);
+  const retriesRef = useRef(0);
   const langRef = useRef(lang);
 
   // O idioma só pode ser trocado entre sessões; guardamos o valor mais recente
@@ -81,15 +104,32 @@ export function useSpeechRecognition(lang: string): UseSpeechRecognitionResult {
     langRef.current = lang;
   }, [lang]);
 
-  const commitTranscript = useCallback((value: string) => {
-    transcriptRef.current = value;
-    setTranscriptState(value);
+  /** Reconstrói o texto a partir da base mais os finais da sessão atual. */
+  const publishTranscript = useCallback(() => {
+    let text = baseRef.current;
+    for (const piece of finalsRef.current) {
+      if (piece) text = appendChunk(text, piece);
+    }
+    if (text !== transcriptRef.current) {
+      transcriptRef.current = text;
+      setTranscriptState(text);
+    }
   }, []);
 
-  const clearRestartTimer = useCallback(() => {
+  /** Fecha a sessão atual: o que ela reconheceu passa a fazer parte da base. */
+  const foldSession = useCallback(() => {
+    baseRef.current = transcriptRef.current;
+    finalsRef.current = [];
+  }, []);
+
+  const clearTimers = useCallback(() => {
     if (restartTimerRef.current !== null) {
       window.clearTimeout(restartTimerRef.current);
       restartTimerRef.current = null;
+    }
+    if (watchdogRef.current !== null) {
+      window.clearInterval(watchdogRef.current);
+      watchdogRef.current = null;
     }
   }, []);
 
@@ -107,32 +147,45 @@ export function useSpeechRecognition(lang: string): UseSpeechRecognitionResult {
     recognition.interimResults = true;
     recognition.maxAlternatives = 1;
 
+    const markSignal = () => {
+      lastSignalRef.current = Date.now();
+    };
+
     recognition.onstart = () => {
+      markSignal();
+      // A sessão subiu: o contador de tentativas volta a zero.
+      retriesRef.current = 0;
       setListening(true);
       setError(null);
     };
 
     recognition.onresult = (event) => {
+      markSignal();
       let pendingInterim = "";
-      let confirmed = transcriptRef.current;
 
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const result = event.results[i];
         const text = result[0]?.transcript ?? "";
-        if (result.isFinal) {
-          confirmed = appendChunk(confirmed, text);
-        } else {
-          pendingInterim = appendChunk(pendingInterim, text);
-        }
+        // Gravar na posição do índice em vez de concatenar deixa a revisão de
+        // um trecho substituir a versão anterior, em vez de duplicá-la.
+        if (result.isFinal) finalsRef.current[i] = text;
+        else pendingInterim = appendChunk(pendingInterim, text);
       }
 
-      if (confirmed !== transcriptRef.current) commitTranscript(confirmed);
+      publishTranscript();
       interimRef.current = pendingInterim;
       setInterim(pendingInterim);
     };
 
     recognition.onerror = (event) => {
+      markSignal();
       if (BENIGN_ERRORS.has(event.error)) return;
+
+      if (RETRYABLE_ERRORS.has(event.error) && retriesRef.current < MAX_RETRIES) {
+        retriesRef.current += 1;
+        return;
+      }
+
       setError(
         ERROR_MESSAGES[event.error] ??
           `Erro no reconhecimento de fala: ${event.error}`,
@@ -142,46 +195,71 @@ export function useSpeechRecognition(lang: string): UseSpeechRecognitionResult {
     };
 
     recognition.onend = () => {
+      markSignal();
+
       // O trecho provisório se perde quando a sessão termina; preservamos o que
-      // já havia sido reconhecido.
+      // já havia sido reconhecido antes de fechar o vetor de finais.
       if (interimRef.current) {
-        commitTranscript(appendChunk(transcriptRef.current, interimRef.current));
+        transcriptRef.current = appendChunk(
+          transcriptRef.current,
+          interimRef.current,
+        );
+        setTranscriptState(transcriptRef.current);
         interimRef.current = "";
         setInterim("");
       }
+      foldSession();
 
       if (!keepAliveRef.current) {
+        clearTimers();
         recognitionRef.current = null;
         setListening(false);
         return;
       }
 
+      // O reinício é imediato: cada milissegundo entre sessões é fala que o
+      // reconhecedor não ouve. O atraso só cresce se `start` estiver falhando.
+      const delay = retriesRef.current === 0 ? 0 : 250 * 2 ** (retriesRef.current - 1);
       restartTimerRef.current = window.setTimeout(() => {
         restartTimerRef.current = null;
         if (!keepAliveRef.current) return;
         try {
           recognition.start();
         } catch {
-          // `InvalidStateError` quando a sessão já voltou sozinha: nada a fazer.
+          // `InvalidStateError` quando a sessão já voltou sozinha; qualquer
+          // outra falha entra no recuo progressivo do próximo `onend`.
+          retriesRef.current = Math.min(retriesRef.current + 1, MAX_RETRIES);
         }
-      }, 150);
+      }, delay);
     };
 
     recognitionRef.current = recognition;
     keepAliveRef.current = true;
+    retriesRef.current = 0;
+    lastSignalRef.current = Date.now();
+
+    // O Chrome às vezes para de emitir eventos sem nunca chamar `onend`. Nesse
+    // caso o `abort` força o ciclo de reinício que devolve a transcrição.
+    watchdogRef.current = window.setInterval(() => {
+      if (!keepAliveRef.current) return;
+      if (Date.now() - lastSignalRef.current < WATCHDOG_MS) return;
+      lastSignalRef.current = Date.now();
+      recognitionRef.current?.abort();
+    }, WATCHDOG_TICK_MS);
 
     try {
       recognition.start();
     } catch {
+      clearTimers();
       recognitionRef.current = null;
       keepAliveRef.current = false;
       setError("Não foi possível iniciar o reconhecimento de fala.");
     }
-  }, [commitTranscript]);
+  }, [clearTimers, foldSession, publishTranscript]);
 
   const stop = useCallback(() => {
     keepAliveRef.current = false;
-    clearRestartTimer();
+    clearTimers();
     const recognition = recognitionRef.current;
     if (!recognition) {
       setListening(false);
@@ -189,25 +267,33 @@ export function useSpeechRecognition(lang: string): UseSpeechRecognitionResult {
     }
     // `stop` (e não `abort`) para que o último trecho ainda seja finalizado.
     recognition.stop();
-  }, [clearRestartTimer]);
+  }, [clearTimers]);
+
+  const commit = useCallback(
+    (value: string) => {
+      baseRef.current = value;
+      finalsRef.current = [];
+      transcriptRef.current = value;
+      setTranscriptState(value);
+    },
+    [],
+  );
 
   const reset = useCallback(() => {
-    commitTranscript("");
+    commit("");
     interimRef.current = "";
     setInterim("");
     setError(null);
-  }, [commitTranscript]);
-
-  const setTranscript = useCallback(
-    (value: string) => commitTranscript(value),
-    [commitTranscript],
-  );
+  }, [commit]);
 
   useEffect(() => {
     return () => {
       keepAliveRef.current = false;
       if (restartTimerRef.current !== null) {
         window.clearTimeout(restartTimerRef.current);
+      }
+      if (watchdogRef.current !== null) {
+        window.clearInterval(watchdogRef.current);
       }
       recognitionRef.current?.abort();
       recognitionRef.current = null;
@@ -223,6 +309,6 @@ export function useSpeechRecognition(lang: string): UseSpeechRecognitionResult {
     start,
     stop,
     reset,
-    setTranscript,
+    setTranscript: commit,
   };
 }
