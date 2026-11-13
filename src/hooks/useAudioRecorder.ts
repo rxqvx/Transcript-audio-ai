@@ -19,6 +19,8 @@ export interface Recording {
   blob: Blob;
   mimeType: string;
   durationMs: number;
+  /** Nome do arquivo quando o áudio foi enviado em vez de gravado. */
+  name?: string;
 }
 
 export interface UseAudioRecorderResult {
@@ -31,13 +33,16 @@ export interface UseAudioRecorderResult {
   start: () => Promise<boolean>;
   stop: () => void;
   clear: () => void;
+  /** Usa um arquivo de áudio do usuário como se fosse a última gravação. */
+  load: (file: File) => void;
   /** Nó de análise para o visualizador; `null` fora de uma gravação. */
   getAnalyser: () => AnalyserNode | null;
 }
 
 /**
  * Captura o microfone com `MediaRecorder` e expõe um `AnalyserNode` para o
- * visualizador. O áudio fica só na memória do navegador — nada é enviado.
+ * visualizador, ou recebe um arquivo pronto via `load`. O áudio fica só na
+ * memória do navegador — nada é enviado para servidores.
  */
 export function useAudioRecorder(): UseAudioRecorderResult {
   const [recording, setRecording] = useState(false);
@@ -170,6 +175,25 @@ export function useAudioRecorder(): UseAudioRecorderResult {
     recorder.stop();
   }, []);
 
+  const load = useCallback((file: File) => {
+    if (recorderRef.current) return;
+    if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current);
+    const url = URL.createObjectURL(file);
+    resultUrlRef.current = url;
+    setError(null);
+    setResult({ url, blob: file, mimeType: file.type, durationMs: 0, name: file.name });
+
+    // A duração de um arquivo só aparece depois de ler os metadados.
+    const probe = new Audio(url);
+    probe.onloadedmetadata = () => {
+      const ms = probe.duration * 1000;
+      if (!Number.isFinite(ms)) return;
+      setResult((current) =>
+        current?.url === url ? { ...current, durationMs: ms } : current,
+      );
+    };
+  }, []);
+
   const clear = useCallback(() => {
     if (resultUrlRef.current) {
       URL.revokeObjectURL(resultUrlRef.current);
@@ -199,6 +223,7 @@ export function useAudioRecorder(): UseAudioRecorderResult {
     start,
     stop,
     clear,
+    load,
     getAnalyser: () => analyserRef.current,
   };
 }

@@ -76,6 +76,8 @@ A captura do microfone só é liberada em contexto seguro: `localhost` ou HTTPS.
 
 - Prévia ao vivo enquanto você fala, com o trecho provisório em itálico
 - Transcrição final com Whisper ao parar a gravação, com progresso por trecho
+- Envio de arquivo de áudio (MP3, WAV, M4A, OGG/Opus, WebM, vídeo) para
+  transcrever direto com o Whisper — o arquivo também não sai do navegador
 - Escolha do modelo (qualidade × tamanho do download) e do idioma
 - Visualizador de volume em canvas
 - Edição manual do texto depois de parar a gravação

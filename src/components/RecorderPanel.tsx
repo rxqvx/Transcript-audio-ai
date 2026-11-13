@@ -83,6 +83,20 @@ export function RecorderPanel() {
     recorder.clear();
   }, [recorder, speech, whisper]);
 
+  const handleUpload = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      // Zerar o input deixa escolher o mesmo arquivo de novo.
+      event.target.value = "";
+      if (!file) return;
+      setRefined(false);
+      speech.reset();
+      // A troca de `recorder.result` dispara o Whisper pelo efeito acima.
+      recorder.load(file);
+    },
+    [recorder, speech],
+  );
+
   const handleRetranscribe = useCallback(() => {
     const result = recorder.result;
     if (!result) return;
@@ -177,7 +191,7 @@ export function RecorderPanel() {
             </p>
             <p className="mt-1 text-sm text-black/50 dark:text-white/50">
               {!active
-                ? "Toque no microfone para começar"
+                ? "Toque no microfone ou envie um arquivo"
                 : speech.listening
                   ? "Ouvindo… fale normalmente"
                   : speech.error || unsupported
@@ -185,6 +199,17 @@ export function RecorderPanel() {
                     : "Gravando (prévia iniciando…)"}
             </p>
           </div>
+
+          <label className="cursor-pointer rounded-lg border border-black/10 bg-white px-4 py-2 text-sm font-medium transition focus-within:ring-2 focus-within:ring-indigo-500/40 hover:bg-black/5 has-disabled:cursor-not-allowed has-disabled:opacity-40 dark:border-white/15 dark:bg-white/10 dark:hover:bg-white/20">
+            Enviar arquivo de áudio
+            <input
+              type="file"
+              accept="audio/*,video/*,.opus"
+              onChange={handleUpload}
+              disabled={active || whisper.busy}
+              className="sr-only"
+            />
+          </label>
 
           <AudioVisualizer getAnalyser={recorder.getAnalyser} active={active} />
 
@@ -299,18 +324,22 @@ export function RecorderPanel() {
 
       {recorder.result && !active && (
         <section className="rounded-2xl border border-black/10 bg-white/70 p-6 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/5">
-          <h2 className="mb-3 text-lg font-semibold">Áudio gravado</h2>
+          <h2 className="mb-3 truncate text-lg font-semibold">
+            {recorder.result.name ?? "Áudio gravado"}
+          </h2>
           <audio
             controls
             src={recorder.result.url}
             className="w-full"
             preload="metadata"
           />
-          <div className="mt-4">
-            <ActionButton onClick={handleDownloadAudio}>
-              Baixar áudio
-            </ActionButton>
-          </div>
+          {!recorder.result.name && (
+            <div className="mt-4">
+              <ActionButton onClick={handleDownloadAudio}>
+                Baixar áudio
+              </ActionButton>
+            </div>
+          )}
         </section>
       )}
     </div>

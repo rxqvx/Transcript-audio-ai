@@ -199,7 +199,7 @@ export function useWhisper(): UseWhisperResult {
       } catch {
         setBusy(false);
         setProgress(IDLE);
-        setError("Não foi possível ler o áudio gravado para transcrever.");
+        setError("Não foi possível ler este áudio. Tente MP3, WAV, M4A, OGG ou WebM.");
         return null;
       }
 

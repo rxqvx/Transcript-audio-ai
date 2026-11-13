@@ -9,7 +9,7 @@ export default function Home() {
         </h1>
         <p className="mx-auto mt-3 max-w-xl text-black/60 dark:text-white/60">
           Veja o texto aparecer enquanto você fala e receba a transcrição
-          definitiva ao parar. Tudo roda no seu navegador — nenhum áudio é
+          definitiva ao parar — ou envie um arquivo de áudio pronto. Tudo roda no seu navegador — nenhum áudio é
           enviado para servidores.
         </p>
       </header>
